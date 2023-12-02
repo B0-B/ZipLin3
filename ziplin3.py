@@ -139,100 +139,98 @@ class client (paramiko.SSHClient):
             ValueError(stderr)
         return stdout.read().decode('utf-8')
     
-    def send (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, force: bool=False):
+    def sendFile (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, force: bool=False) -> None:
 
         '''
-        Sends a file or directory from originPath to targetPath.
+        Sends a file from originPath to targetPath.
         If client.ssh was called beforehand, the targetPath will
         be considered on remote system.
 
-        If the destination is a directory or a symlink to a directory, 
-        the source is moved inside the directory.
-        The destination path must not already exist.
-
-        If force is enabled, the target will be overriden, otherwise
-        if both checksums (of origin and target) match it will be skipped.
+        originPath:     path to file as string or posix
+        targetPath:     destination directory path as string or posix
         '''
 
+        # set the types correctly
         if type(originPath) is str:
             originPath = pathlib.Path(originPath)
         if type(targetPath) in [pathlib.PosixPath, pathlib.WindowsPath]:
             targetPath = str(targetPath.absolute())
         
-        filename = originPath.name
-        extension = originPath.suffix
-        formattedfilename = filename + '.' + extension
+        # get the file name
+        formattedfilename = originPath.name
 
-        # check if the filename is included in targetPath, if not include it.
+        # check if the filename is included in targetPath, if not include it
         if not formattedfilename in targetPath:
-            if targetPath[-1] == '/':
-                targetPath += formattedfilename
-            else:
-                targetPath += '/' + formattedfilename
-            
+            targetPath =  self.join(targetPath, formattedfilename)
 
         # check if scp is enabled
+        # based on result determine the target checksum
         if self.sshEnabled:
-
             sftp = self.open_sftp()
+            target_sum = self.checksum_remote(targetPath)
+        else:
+            target_sum = self.checksum(targetPath)
 
-            # if the provided path is a directory
-            # iterate this for every file 
-            if originPath.is_dir():
+        # if not forced check for checksum
+        if not force:
 
-                local_path = originPath
-                remote_path = targetPath
-
-                for root, dirs, files in os.walk(local_path):
-
-                    # move all files found
-                    for file in files:
-
-                        local_file_path = os.path.join(root, file)
-                        remote_file_path = os.path.join(remote_path, os.path.relpath(local_file_path, local_path))
-
-                        if not force:
-
-                            local_sum = self.checksum(local_file_path)
-                            remote_sum = self.checksum_remote(remote_file_path)
-
-                            if local_sum == remote_sum:
-
-                                print(f'{remote_file_path} is already up-to-date with origin, skip.')
-                                continue
-
-                        sftp.put(local_file_path, remote_file_path)
-
-                    # repeat recursively for all dirs
-                    for dir in dirs:
-
-                        local_dir_path = os.path.join(root, dir)
-                        remote_dir_path = os.path.join(targetPath, dir)
-
-                        self.send(local_dir_path, remote_dir_path, force=force)
+            orgin_sum = self.checksum(originPath)
             
-            # otherwise the origin is just a file
-            else:
+            if orgin_sum == target_sum:
 
-                print('debug1', originPath)
-                print('debug12', type(originPath))
-                print('debug2', str(originPath.absolute()))
-                print('debug3', type(str(originPath.absolute())))
-                print('debug4', type(targetPath))
+                print(f'{targetPath} is already up-to-date with origin.')
+                return
 
-                # check if it's zip archive
-                if originPath.joinpath('.zip').exists():
-                    print('zip detected')
-                    sftp.put(str(originPath.joinpath('.zip').absolute()), targetPath)
-                else:
-                    print('file detected')
-                    sftp.put(str(originPath.absolute()), targetPath)
+        # send
+        if self.sshEnabled:
+            sftp.put(originPath, targetPath)
+        else:
+            shutil.move(originPath, targetPath)
+
+    def send (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, force: bool=False):
+
+        '''
+        Sends a file or whole directory at origin into a directory at targetPath.
+        If client.ssh was called beforehand, the targetPath will
+        be considered on remote system.
+
+        originPath:     path to file as string or posix
+        targetPath:     destination directory path as string or posix
+        '''
+
+        # originPath pointing at single file
+        if originPath.is_dir():
+
+            for _, dirs, files in os.walk(originPath):
+
+                # send all files in current pointer directory
+                for file in files:
+
+                    self.sendFile(os.path.join(originPath, file), targetPath, force=force)
+
+                # next recurse for directories
+                for dir in dirs:
+
+                    self.send(os.path.join(originPath, dir), os.path.join(targetPath, dir))
         
-        # move locally
+        # originPath pointing at single file
         else:
 
-            # move works the same for directory or file
-            shutil.move(originPath, targetPath)
+            self.sendFile(originPath, targetPath, force=force)
+
+    def join (self, path: str, *paths: str) -> str:
+
+        '''
+        An improved join path method.
+        '''
+
+        extendedPath = os.path.join(path, *paths)
+
+        # in any case convert to unix path if unix is detected
+        if '/' in path or '$HOME' in path:
+            extendedPath = extendedPath.replace('\\', '/')
+
+        return extendedPath
 
     def ssh (self, user: str, host: str, password: str|None=None, sshPath: str|pathlib.PosixPath|None=None, port: int=22) -> None:
         
@@ -272,12 +270,11 @@ if __name__ == '__main__':
 
     zl = client()
     zl.ssh(usr, testIP, pw)
-    # zl.ssh()
     # print('test:', zl.exec('pwd'))
     # print('test:', zl.exec('ls $HOME/tracker/'))
     # print('checksum', zl.checksum('testFolder.zip'))
     # print('checksum remote', zl.checksum_remote('$HOME/tracker/notexistent.js'))
     # zl.container('./testFolder')
     # print('test', pathlib.Path('testFolder.zip').is_dir())
-    zl.send( 'README.md', '/root' )
+    zl.send( 'testFolder', '/root/target' )
     # zl.backup('testFolder', '$HOME')
