@@ -1,6 +1,6 @@
 '''
 ZipLin3 uses zip and ssh to transfer files, directories and archives safely from one computer to another.
-Although RAR is faster for large file compression, zip is superior for cross-platform compatiility.
+Although RAR is faster for large file compression, zip is superior for cross-platform compatibility.
 '''
 
 import os
@@ -10,7 +10,6 @@ from cryptography.fernet import Fernet
 from traceback import print_exc
 import shutil
 import hashlib
-import platform
 
 class client (paramiko.SSHClient):
 
@@ -31,6 +30,14 @@ class client (paramiko.SSHClient):
     
     def backup (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, compress: bool=True, force: bool=True) -> bool:
 
+        '''
+        Backups the origin path (host) which points at a file or directory, to target
+        path, the destination diectory on host or remote client if ssh is enabled.
+
+        If compress is true the originPath will be zipped, but only if it's not an 
+        archive already e.g. of type .zip, .rar, .tar.
+        '''
+
         # convert string paths to posix paths
         if type(originPath) is str:
             originPath = pathlib.Path(originPath)
@@ -38,20 +45,18 @@ class client (paramiko.SSHClient):
             targetPath = pathlib.Path(targetPath)
 
         # check if the origin path is a zip already
-        isArchiveAlready = False
-        originStringPath = str(originPath.absolute())
+        isArchive = False
+        # originStringPath = str(originPath.absolute())
         for ext in ['.zip', '.rar', '.tar']:
-            if ext in originStringPath:
-                isArchiveAlready = True
+            if ext in originPath.name:
+                isArchive = True
                 break
         
         # for both cases (file, or dir) create an archive
         # if compression is enabled
-        if compress and not isArchiveAlready:
-            parent = originPath.parent
-            base = originPath.name
+        if compress and not isArchive:
             self.container(originPath)
-            originPath = parent.joinpath( base + '.zip' )
+            originPath = originPath.parent.joinpath( originPath.name + '.zip' )
         
         # send
         try:
@@ -60,7 +65,7 @@ class client (paramiko.SSHClient):
             print_exc()
 
         # remove the zip if it was compressed
-        if compress and not isArchiveAlready:
+        if compress and not isArchive:
             originPath.unlink()
 
     def checksum (self, filePath: str|pathlib.PosixPath) -> str:
@@ -147,7 +152,8 @@ class client (paramiko.SSHClient):
         be considered on remote system.
 
         originPath:     path to file as string or posix
-        targetPath:     destination directory path as string or posix
+        targetPath:     destination directory path as string or posix.
+                        Directory needs to exist already.
         '''
 
         # set the types correctly
@@ -161,7 +167,7 @@ class client (paramiko.SSHClient):
 
         # check if the filename is included in targetPath, if not include it
         if not formattedfilename in targetPath:
-            targetPath =  self.join(targetPath, formattedfilename)
+            targetPath = self.join(targetPath, formattedfilename)
 
         # check if scp is enabled
         # based on result determine the target checksum
@@ -187,7 +193,8 @@ class client (paramiko.SSHClient):
         else:
             shutil.move(originPath, targetPath)
 
-    def send (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, force: bool=False):
+    def send (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+              force: bool=False, verbose: bool=True) -> None:
 
         '''
         Sends a file or whole directory at origin into a directory at targetPath.
@@ -198,23 +205,35 @@ class client (paramiko.SSHClient):
         targetPath:     destination directory path as string or posix
         '''
 
-        # originPath pointing at single file
-        if originPath.is_dir():
+        if not os.path.isdir(targetPath):
+            ValueError('targetPath must point at a directory, not a file!')
+
+        # make sure the target path exists
+        if not self.pathExists(targetPath):
+            if verbose: print(f'create target directory {targetPath}')
+            self.createDir(targetPath)
+
+        # originPath pointing at directory
+        if os.path.isdir(originPath):
 
             for _, dirs, files in os.walk(originPath):
 
                 # send all files in current pointer directory
                 for file in files:
-
-                    self.sendFile(os.path.join(originPath, file), targetPath, force=force)
+                    
+                    if verbose: print(f'move {self.join(originPath, file)} to .{targetPath}')
+                    self.sendFile(self.join(originPath, file), targetPath, force=force)
 
                 # next recurse for directories
                 for dir in dirs:
 
-                    self.send(os.path.join(originPath, dir), os.path.join(targetPath, dir))
-        
+                    self.send(self.join(originPath, dir), self.join(targetPath, dir))
+
+                # stop the loop after one iteration
+                return
+
         # originPath pointing at single file
-        else:
+        elif os.path.isfile(originPath):
 
             self.sendFile(originPath, targetPath, force=force)
 
@@ -262,7 +281,43 @@ class client (paramiko.SSHClient):
 
             print_exc()
 
+    def pathExists (self, path: str|pathlib.PosixPath) -> bool:
+
+        '''
+        Checks if a local or remote path, pointing at file or directory, exists.
+        The path is considered remote if client.sshEnabled is true.
+        '''
+
+        if self.sshEnabled:
+            # check remotely
+            # if os.path.isdir(path):
+            #     exists = zl.exec(f'[ -d "{path}" ] && echo 1')
+            # else:
+            #     exists = zl.exec(f'[ -f "{path}" ] && echo 1')
+            return bool(zl.exec(f'[ -d "{path}" ] && echo 1') + zl.exec(f'[ -f "{path}" ] && echo 1'))
+        else:
+            # check locally
+            if os.path.isfile(path) or os.path.isdir(path):
+                return True
+            return False
+    
+    def createDir (self, path: str|pathlib.PosixPath):
+
+        '''
+        Creates a local or remote directory.
+        The path is considered remote if client.sshEnabled is true.
+        '''
+
+        if self.sshEnabled:
+            zl.exec(f'mkdir {path}')
+        else:
+            # check locally
+            if not os.path.isdir(path):
+                os.makedirs(path)
+
 if __name__ == '__main__':
+
+    
 
     usr = "root"
     testIP = "5.161.46.77"
@@ -270,11 +325,8 @@ if __name__ == '__main__':
 
     zl = client()
     zl.ssh(usr, testIP, pw)
-    # print('test:', zl.exec('pwd'))
-    # print('test:', zl.exec('ls $HOME/tracker/'))
-    # print('checksum', zl.checksum('testFolder.zip'))
-    # print('checksum remote', zl.checksum_remote('$HOME/tracker/notexistent.js'))
-    # zl.container('./testFolder')
-    # print('test', pathlib.Path('testFolder.zip').is_dir())
-    zl.send( 'testFolder', '/root/target' )
-    # zl.backup('testFolder', '$HOME')
+
+    # zl.sendFile('testFolder/sub/test.txt', '/root/target/remove')
+    # zl.createDir('/root/target/remove')
+    zl.send('testFolder', '/root/target/testFolder')
+    # print('mkdir test:', zl.pathExists("./testFolder"))
