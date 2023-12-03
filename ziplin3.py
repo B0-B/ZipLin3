@@ -1,6 +1,10 @@
+#!/usr/bin/env python3
+
 '''
-ZipLin3 uses zip and ssh to transfer files, directories and archives safely from one computer to another.
-Although RAR is faster for large file compression, zip is superior for cross-platform compatibility.
+ZipLin3 is an automated backup program which uses zip and ssh 
+to transfer files, directories and archives safely from one 
+computer to another. Although RAR is faster for large file 
+compression, zip is superior for cross-platform compatibility.
 '''
 
 import os
@@ -28,7 +32,8 @@ class client (paramiko.SSHClient):
         # store routes: origin-target-pairs
         self.routes = {}
     
-    def backup (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, compress: bool=True, force: bool=True) -> bool:
+    def backup (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+                compress: bool=True, force: bool=False, verbose: bool=True) -> bool:
 
         '''
         Backups the origin path (host) which points at a file or directory, to target
@@ -41,8 +46,8 @@ class client (paramiko.SSHClient):
         # convert string paths to posix paths
         if type(originPath) is str:
             originPath = pathlib.Path(originPath)
-        if type(targetPath) is str:
-            targetPath = pathlib.Path(targetPath)
+        if type(targetPath) is not str:
+            targetPath = self.join(targetPath, '')
 
         # check if the origin path is a zip already
         isArchive = False
@@ -55,12 +60,16 @@ class client (paramiko.SSHClient):
         # for both cases (file, or dir) create an archive
         # if compression is enabled
         if compress and not isArchive:
+
+            zipPath = originPath.parent.joinpath( originPath.name + '.zip' )
+            if verbose: print(f'prepare zip container {zipPath} ...')
             self.container(originPath)
-            originPath = originPath.parent.joinpath( originPath.name + '.zip' )
-        
+            # transform origin path to zip path
+            originPath = zipPath
+
         # send
         try:
-            self.send(originPath, targetPath, force)
+            self.send(originPath, targetPath, force, verbose)
         except:
             print_exc()
 
@@ -177,7 +186,7 @@ class client (paramiko.SSHClient):
         else:
             target_sum = self.checksum(targetPath)
 
-        # if not forced check for checksum
+        # if not forced compare checksums first
         if not force:
 
             orgin_sum = self.checksum(originPath)
@@ -210,18 +219,19 @@ class client (paramiko.SSHClient):
 
         # make sure the target path exists
         if not self.pathExists(targetPath):
-            if verbose: print(f'create target directory {targetPath}')
+            if verbose: print(f'create target directory: {targetPath}')
             self.createDir(targetPath)
 
         # originPath pointing at directory
         if os.path.isdir(originPath):
-
+            
+            if verbose: print(f'directory detected: {originPath}')
             for _, dirs, files in os.walk(originPath):
 
                 # send all files in current pointer directory
                 for file in files:
                     
-                    if verbose: print(f'move {self.join(originPath, file)} to .{targetPath}')
+                    if verbose: print(f'{self.join(originPath, file)} ---> {targetPath}')
                     self.sendFile(self.join(originPath, file), targetPath, force=force)
 
                 # next recurse for directories
@@ -235,6 +245,7 @@ class client (paramiko.SSHClient):
         # originPath pointing at single file
         elif os.path.isfile(originPath):
 
+            if verbose: print(f'file detected: {originPath}')
             self.sendFile(originPath, targetPath, force=force)
 
     def join (self, path: str, *paths: str) -> str:
@@ -325,8 +336,9 @@ if __name__ == '__main__':
 
     zl = client()
     zl.ssh(usr, testIP, pw)
-
-    # zl.sendFile('testFolder/sub/test.txt', '/root/target/remove')
+    # zl.container('testFolder')
+    # zl.sendFile('C:\\Users\\weezl\\Desktop\\B0-B\\Scripting\\ZipLin3\\testFolder.zip', '/root/target')
     # zl.createDir('/root/target/remove')
-    zl.send('testFolder', '/root/target/testFolder')
+    # zl.send('testFolder.zip', '/root/target/')
     # print('mkdir test:', zl.pathExists("./testFolder"))
+    zl.backup('testFolder', '/root/target/', compress=True)
