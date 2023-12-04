@@ -14,6 +14,7 @@ from cryptography.fernet import Fernet
 from traceback import print_exc
 import shutil
 import hashlib
+import getpass
 
 class client (paramiko.SSHClient):
 
@@ -76,6 +77,8 @@ class client (paramiko.SSHClient):
         # remove the zip if it was compressed
         if compress and not isArchive:
             originPath.unlink()
+        
+        if verbose: print(f'done.')
 
     def checksum (self, filePath: str|pathlib.PosixPath) -> str:
 
@@ -153,7 +156,8 @@ class client (paramiko.SSHClient):
             ValueError(stderr)
         return stdout.read().decode('utf-8')
     
-    def sendFile (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, force: bool=False) -> None:
+    def sendFile (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+                  force: bool=False, verbose: bool=True) -> None:
 
         '''
         Sends a file from originPath to targetPath.
@@ -197,6 +201,7 @@ class client (paramiko.SSHClient):
                 return
 
         # send
+        if verbose: print(f'{originPath} ---> {targetPath}')
         if self.sshEnabled:
             sftp.put(originPath, targetPath)
         else:
@@ -225,13 +230,13 @@ class client (paramiko.SSHClient):
         # originPath pointing at directory
         if os.path.isdir(originPath):
             
-            if verbose: print(f'directory detected: {originPath}')
+            # if verbose: print(f'sending directory {originPath} ...')
             for _, dirs, files in os.walk(originPath):
 
                 # send all files in current pointer directory
                 for file in files:
                     
-                    if verbose: print(f'{self.join(originPath, file)} ---> {targetPath}')
+                    # if verbose: print(f'{self.join(originPath, file)} ---> {targetPath}')
                     self.sendFile(self.join(originPath, file), targetPath, force=force)
 
                 # next recurse for directories
@@ -245,7 +250,7 @@ class client (paramiko.SSHClient):
         # originPath pointing at single file
         elif os.path.isfile(originPath):
 
-            if verbose: print(f'file detected: {originPath}')
+            # if verbose: print(f'sending file {originPath} ...')
             self.sendFile(originPath, targetPath, force=force)
 
     def join (self, path: str, *paths: str) -> str:
@@ -329,16 +334,13 @@ class client (paramiko.SSHClient):
 if __name__ == '__main__':
 
     
-
+    
     usr = "root"
-    testIP = "5.161.46.77"
-    pw = "powpal"
+    address = "5.161.46.77"
+    password = getpass.getpass(f'password for {usr}: ')
 
+    # initialize a new client
     zl = client()
-    zl.ssh(usr, testIP, pw)
-    # zl.container('testFolder')
-    # zl.sendFile('C:\\Users\\weezl\\Desktop\\B0-B\\Scripting\\ZipLin3\\testFolder.zip', '/root/target')
-    # zl.createDir('/root/target/remove')
-    # zl.send('testFolder.zip', '/root/target/')
-    # print('mkdir test:', zl.pathExists("./testFolder"))
+    zl.ssh(usr, address, password)
+
     zl.backup('testFolder', '/root/target/', compress=True)
