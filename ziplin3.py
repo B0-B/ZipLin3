@@ -35,27 +35,27 @@ class client (paramiko.SSHClient):
         self.routes = {}
         self.host = 'localhost'
     
-    def backup (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+    def backup (self, origin_path: str|pathlib.PosixPath, target_path: str|pathlib.PosixPath, 
                 compress: bool=False, compress_format: str='zip', force: bool=False, verbose: bool=True) -> bool:
 
         '''
         Backups the origin path (host) which points at a file or directory, to target
         path, the destination diectory on host or remote client if ssh is enabled.
 
-        If compress is true the originPath will be zipped, but only if it's not an 
+        If compress is true the origin_path will be zipped, but only if it's not an 
         archive already e.g. of type .zip, .rar, .tar.
         '''
 
         # convert string paths to posix paths
-        if type(originPath) is str:
-            originPath = pathlib.Path(originPath)
-        if type(targetPath) is not str:
-            targetPath = self.join(targetPath, '')
+        if type(origin_path) is str:
+            origin_path = pathlib.Path(origin_path)
+        if type(target_path) is not str:
+            target_path = self.join(target_path, '')
 
         # check if the origin path is a zip already
         isArchive = False
         for ext in ['.zip', '.rar', '.tar']:
-            if ext in originPath.name:
+            if ext in origin_path.name:
                 isArchive = True
                 break
         
@@ -63,21 +63,21 @@ class client (paramiko.SSHClient):
         # if compression is enabled
         if compress and not isArchive:
 
-            zipPath = originPath.parent.joinpath( originPath.name + '.zip' )
+            zipPath = origin_path.parent.joinpath( origin_path.name + '.zip' )
             if verbose: print(f'prepare zip container {zipPath} ...')
-            self.compress(originPath, compress=compress_format)
+            self.compress(origin_path, compress=compress_format)
             # transform origin path to zip path
-            originPath = zipPath
+            origin_path = zipPath
 
         # send
         try:
-            self.send(originPath, targetPath, force, verbose)
+            self.send(origin_path, target_path, force, verbose)
         except:
             print_exc()
 
         # remove the zip if it was compressed
         if compress and not isArchive:
-            originPath.unlink()
+            origin_path.unlink()
         
         if verbose: print(f'done.')
 
@@ -145,17 +145,17 @@ class client (paramiko.SSHClient):
             ValueError(stderr)
         return stdout.read().decode('utf-8')
     
-    def send_file (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+    def send_file (self, origin_path: str|pathlib.PosixPath, target_path: str|pathlib.PosixPath, 
                   force: bool=False, verbose: bool=True) -> None:
 
         '''
-        Sends a file from originPath to targetPath.
-        If client.ssh was called beforehand, the targetPath will
+        Sends a file from origin_path to target_path.
+        If client.ssh was called beforehand, the target_path will
         be considered on remote system. A check_sum check is performed
         apriori to prevent redundant copying.
 
-        originPath:     path to file as string or posix
-        targetPath:     destination directory path as string or posix.
+        origin_path:     path to file as string or posix
+        target_path:     destination directory path as string or posix.
                         Directory needs to exist already.
         '''
 
@@ -166,100 +166,100 @@ class client (paramiko.SSHClient):
             self.sftp = self.open_sftp()
 
         # set the types correctly
-        if type(originPath) is str:
-            originPath = pathlib.Path(originPath)
-        if type(targetPath) in [pathlib.PosixPath, pathlib.WindowsPath]:
-            targetPath = str(targetPath.absolute())
+        if type(origin_path) is str:
+            origin_path = pathlib.Path(origin_path)
+        if type(target_path) in [pathlib.PosixPath, pathlib.WindowsPath]:
+            target_path = str(target_path.absolute())
         
         # get the file name
-        formattedfilename = originPath.name
+        formattedfilename = origin_path.name
 
-        # check if the filename is included in targetPath, if not include it
-        if not formattedfilename in targetPath:
-            targetPath = self.join(targetPath, formattedfilename)
+        # check if the filename is included in target_path, if not include it
+        if not formattedfilename in target_path:
+            target_path = self.join(target_path, formattedfilename)
 
         # check if scp is enabled
         # based on result determine the target checksum
         target_sum = None
-        if self.path_exists(targetPath): # checks remotely or locally
+        if self.path_exists(target_path): # checks remotely or locally
             if self.ssh_enabled:
-                target_sum = self.checksum_remote(targetPath)
+                target_sum = self.checksum_remote(target_path)
             else:
-                target_sum = self.checksum(targetPath)
+                target_sum = self.checksum(target_path)
 
         # if not forced, and a target exists (and thus a target sum) 
         # the algo needs to compare checksums first
         if not force and target_sum:
 
-            orgin_sum = self.checksum(originPath)
+            orgin_sum = self.checksum(origin_path)
             
             if orgin_sum == target_sum:
-                print(f'{targetPath} is already up-to-date with origin.')
+                print(f'{target_path} is already up-to-date with origin.')
                 return
 
         # send
-        if verbose: print(f'{originPath} ---> {self.host}:{targetPath}')
+        if verbose: print(f'{origin_path} ---> {self.host}:{target_path}')
         if self.ssh_enabled:
             # move remotely if client.ssh was called apriori
-            self.sftp.put(originPath, targetPath)
+            self.sftp.put(origin_path, target_path)
         else:
             # move file locally
-            shutil.move(originPath, targetPath)
+            shutil.move(origin_path, target_path)
         
         # close the sftp if one-time use
         if one_time_sftp:
             self.sftp = self.sftp.close()
 
-    def send (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+    def send (self, origin_path: str|pathlib.PosixPath, target_path: str|pathlib.PosixPath, 
               force: bool=False, verbose: bool=True) -> None:
 
         '''
-        Sends a file or whole directory at origin into a directory at targetPath.
-        If client.ssh was called beforehand, the targetPath will
+        Sends a file or whole directory at origin into a directory at target_path.
+        If client.ssh was called beforehand, the target_path will
         be considered on remote system.
 
-        originPath:     path to file as string or posix
-        targetPath:     destination directory path as string or posix
+        origin_path:     path to file as string or posix
+        target_path:     destination directory path as string or posix
         '''
 
         # open sftp connection
         if self.ssh_enabled:
             self.sftp = self.open_sftp()
 
-        # check if targetpath is a dir
+        # check if target_path is a dir
         is_dir = False
         try:
-            self.sftp.stat(targetPath)
+            self.sftp.stat(target_path)
         except:
             is_dir = True
         if is_dir:
-            ValueError('targetPath must point at a directory, not a file!')
+            ValueError('target_path must point at a directory, not a file!')
         
-        # originPath pointing at directory
-        if os.path.isdir(originPath):
+        # origin_path pointing at directory
+        if os.path.isdir(origin_path):
             
-            # if verbose: print(f'sending directory {originPath} ...')
-            for _, dirs, files in os.walk(originPath):
+            # if verbose: print(f'sending directory {origin_path} ...')
+            for _, dirs, files in os.walk(origin_path):
 
                 # send all files in current pointer directory
                 for file in files:
                     
-                    # if verbose: print(f'{self.join(originPath, file)} ---> {targetPath}')
-                    self.send_file(self.join(originPath, file), targetPath, force=force)
+                    # if verbose: print(f'{self.join(origin_path, file)} ---> {target_path}')
+                    self.send_file(self.join(origin_path, file), target_path, force=force)
 
                 # next recurse for directories
                 for dir in dirs:
 
-                    self.send(self.join(originPath, dir), self.join(targetPath, dir))
+                    self.send(self.join(origin_path, dir), self.join(target_path, dir))
 
                 # stop the loop after one iteration
                 return
 
-        # originPath pointing at single file
-        elif os.path.isfile(originPath):
+        # origin_path pointing at single file
+        elif os.path.isfile(origin_path):
 
-            # if verbose: print(f'sending file {originPath} ...')
-            self.send_file(originPath, targetPath, force=force)
+            # if verbose: print(f'sending file {origin_path} ...')
+            self.send_file(origin_path, target_path, force=force)
         
         # close the sftp connection
         if self.ssh_enabled:
@@ -279,18 +279,18 @@ class client (paramiko.SSHClient):
 
         return extendedPath
 
-    def ssh (self, user: str, host: str, password: str|None=None, sshPath: str|pathlib.PosixPath|None=None, port: int=22) -> None:
+    def ssh (self, user: str, host: str, password: str|None=None, ssh_path: str|pathlib.PosixPath|None=None, port: int=22) -> None:
         
         '''
         Connects to host via ssh.
         This method takes either a password or path to ssh file to derve login credentials.
 
-        sshPath:    OpenSSH file format
+        ssh_path:    OpenSSH file format
         '''
 
         try:
 
-            if not sshPath and not password:
+            if not ssh_path and not password:
                 ValueError('Please provide either a password or an ssh file path')
             
             if not password:
@@ -300,7 +300,7 @@ class client (paramiko.SSHClient):
             self.host = host
             self.port = port
 
-            self.connect(self.host, username=self.user, password=password, key_filename=sshPath)
+            self.connect(self.host, username=self.user, password=password, key_filename=ssh_path)
             
             # flip the ssh flag
             self.ssh_enabled = True
@@ -313,7 +313,7 @@ class client (paramiko.SSHClient):
 
         '''
         Checks if a local or remote path, pointing at file or directory, exists.
-        The path is considered remote if client.sshEnabled is true.
+        The path is considered remote if client.ssh_enabled is true.
         '''
 
         if self.ssh_enabled:
@@ -367,8 +367,8 @@ class cron:
         self.sshFilePath = None
 
     def addJob (self, 
-            originPath: str|pathlib.PosixPath, 
-            targetPath: str|pathlib.PosixPath,
+            origin_path: str|pathlib.PosixPath, 
+            target_path: str|pathlib.PosixPath,
             host: str='localhost',
             user: str|None=None,
             password: str|None=None,
@@ -391,8 +391,8 @@ class cron:
         # corpus
         job = {
             'id': None,
-            'originPath': originPath,
-            'targetPath': targetPath,
+            'origin_path': origin_path,
+            'target_path': target_path,
             'host': host,
             'user': user,
             'fingerprint': None,
@@ -427,7 +427,7 @@ class cron:
             cl.ssh(job['user'], job['host'], self.decrypt(self.masterKey, job['fingerprint']), job['sshFilePath'])
         
         # backup
-        cl.backup(job['originPath'], job['targetPath'], job['compress'], job['force'])
+        cl.backup(job['origin_path'], job['target_path'], job['compress'], job['force'])
 
     def decrypt (self, key: bytes, ciphertext: str) -> str:
 
