@@ -8,6 +8,8 @@ compression, zip is superior for cross-platform compatibility.
 '''
 
 import os
+import json
+import base64
 import paramiko
 import pathlib
 from cryptography.fernet import Fernet
@@ -22,19 +24,19 @@ class client (paramiko.SSHClient):
 
         super().__init__()
 
-        # generate a random string seed
-        # self.seed = ''.join([random.choice( string.ascii_letters + string.digits + string.punctuation ) for i in range(16)])
-
-        self.sshEnabled = False
-
         # set policy
         self.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
+        # ssh and file sharing
+        self.ssh_enabled = False
+        self.sftp = None
+
         # store routes: origin-target-pairs
         self.routes = {}
+        self.host = 'localhost'
     
     def backup (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
-                compress: bool=True, force: bool=False, verbose: bool=True) -> bool:
+                compress: bool=False, compress_format: str='zip', force: bool=False, verbose: bool=True) -> bool:
 
         '''
         Backups the origin path (host) which points at a file or directory, to target
@@ -52,7 +54,6 @@ class client (paramiko.SSHClient):
 
         # check if the origin path is a zip already
         isArchive = False
-        # originStringPath = str(originPath.absolute())
         for ext in ['.zip', '.rar', '.tar']:
             if ext in originPath.name:
                 isArchive = True
@@ -64,7 +65,7 @@ class client (paramiko.SSHClient):
 
             zipPath = originPath.parent.joinpath( originPath.name + '.zip' )
             if verbose: print(f'prepare zip container {zipPath} ...')
-            self.container(originPath)
+            self.compress(originPath, compress=compress_format)
             # transform origin path to zip path
             originPath = zipPath
 
@@ -89,14 +90,14 @@ class client (paramiko.SSHClient):
         with open(filePath, 'rb') as file:
             return hashlib.file_digest(file, 'md5').hexdigest()
         
-    def checksum_remote(self, filePath: str|pathlib.PosixPath) -> str:
+    def checksum_remote (self, filePath: str|pathlib.PosixPath) -> str:
         
         '''
         Returns checksum in md5 format for provided remote file.
         If the filepath does not exist, the return will be an empty string.
         '''
 
-        if not self.sshEnabled:
+        if not self.ssh_enabled:
             ValueError('Please enable ssh first with client.ssh!')
         
         # convert filepath to string
@@ -108,46 +109,34 @@ class client (paramiko.SSHClient):
         # remote execute
         return cs
 
-    def container (self, path: str|pathlib.PosixPath) -> None:
+    def compress (self, path: str|pathlib.PosixPath, format: str='zip') -> None:
 
         '''
         Will create a container from provided directory path 
         with same base name and the same (parent) directory.
         The container is a zip archive with same basename.
+
+        [Parameter]
+        path            path to directory which should be archived
+        format          a registered format, e.g. zip, tar
+                        for more info see: shutil.make_archive
         '''
         
-
         if type(path) is not pathlib.PosixPath:
             path = pathlib.Path(path)
         
         if not path.is_dir():
             ValueError('Provided path is not a directory!')
 
-        containerName = path.name
+        base_name = path.name
+        archive_path = path.parent.joinpath(base_name)
 
-        shutil.make_archive(containerName, 'zip', path)
-    
-    def decrypt (self, key: bytes, ciphertext: str) -> str:
+        shutil.make_archive(archive_path, format=format, root_dir=path)
 
-        '''
-        AES decryption method.
-        The Fernet class generates a new initialization vector for 
-        each encryption operation and prepends it to the ciphertext.
-        '''
-
-        cipher = Fernet(key)
-        return cipher.decrypt(str.encode(ciphertext)).decode()
-
-    def encrypt (self, key: bytes, plaintext: str) -> str:
-
-        '''
-        AES encryption method.
-        The Fernet class generates a new initialization vector for 
-        each encryption operation and prepends it to the ciphertext.
-        '''
-
-        cipher = Fernet(key)
-        return cipher.encrypt(str.encode(plaintext)).decode()
+        if archive_path.with_suffix('.'+format).exists():
+            print(f'Successfully created archive {str(archive_path.absolute())}.')
+        else:
+            FileNotFoundError('The archive could not be created.')
     
     def exec (self, command: str) -> str:
 
@@ -156,18 +145,25 @@ class client (paramiko.SSHClient):
             ValueError(stderr)
         return stdout.read().decode('utf-8')
     
-    def sendFile (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
+    def send_file (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
                   force: bool=False, verbose: bool=True) -> None:
 
         '''
         Sends a file from originPath to targetPath.
         If client.ssh was called beforehand, the targetPath will
-        be considered on remote system.
+        be considered on remote system. A check_sum check is performed
+        apriori to prevent redundant copying.
 
         originPath:     path to file as string or posix
         targetPath:     destination directory path as string or posix.
                         Directory needs to exist already.
         '''
+
+        # check if this is a one-time use to activate sftp
+        one_time_sftp = False
+        if not self.sftp:
+            one_time_sftp = True
+            self.sftp = self.open_sftp()
 
         # set the types correctly
         if type(originPath) is str:
@@ -184,28 +180,35 @@ class client (paramiko.SSHClient):
 
         # check if scp is enabled
         # based on result determine the target checksum
-        if self.sshEnabled:
-            sftp = self.open_sftp()
-            target_sum = self.checksum_remote(targetPath)
-        else:
-            target_sum = self.checksum(targetPath)
+        target_sum = None
+        if self.path_exists(targetPath): # checks remotely or locally
+            if self.ssh_enabled:
+                target_sum = self.checksum_remote(targetPath)
+            else:
+                target_sum = self.checksum(targetPath)
 
-        # if not forced compare checksums first
-        if not force:
+        # if not forced, and a target exists (and thus a target sum) 
+        # the algo needs to compare checksums first
+        if not force and target_sum:
 
             orgin_sum = self.checksum(originPath)
             
             if orgin_sum == target_sum:
-
                 print(f'{targetPath} is already up-to-date with origin.')
                 return
 
         # send
-        if verbose: print(f'{originPath} ---> {targetPath}')
-        if self.sshEnabled:
-            sftp.put(originPath, targetPath)
+        if verbose: print(f'{originPath} ---> {self.host}:{targetPath}')
+        if self.ssh_enabled:
+            # move remotely if client.ssh was called apriori
+            self.sftp.put(originPath, targetPath)
         else:
+            # move file locally
             shutil.move(originPath, targetPath)
+        
+        # close the sftp if one-time use
+        if one_time_sftp:
+            self.sftp = self.sftp.close()
 
     def send (self, originPath: str|pathlib.PosixPath, targetPath: str|pathlib.PosixPath, 
               force: bool=False, verbose: bool=True) -> None:
@@ -219,14 +222,19 @@ class client (paramiko.SSHClient):
         targetPath:     destination directory path as string or posix
         '''
 
-        if not os.path.isdir(targetPath):
+        # open sftp connection
+        if self.ssh_enabled:
+            self.sftp = self.open_sftp()
+
+        # check if targetpath is a dir
+        is_dir = False
+        try:
+            self.sftp.stat(targetPath)
+        except:
+            is_dir = True
+        if is_dir:
             ValueError('targetPath must point at a directory, not a file!')
-
-        # make sure the target path exists
-        if not self.pathExists(targetPath):
-            if verbose: print(f'create target directory: {targetPath}')
-            self.createDir(targetPath)
-
+        
         # originPath pointing at directory
         if os.path.isdir(originPath):
             
@@ -237,7 +245,7 @@ class client (paramiko.SSHClient):
                 for file in files:
                     
                     # if verbose: print(f'{self.join(originPath, file)} ---> {targetPath}')
-                    self.sendFile(self.join(originPath, file), targetPath, force=force)
+                    self.send_file(self.join(originPath, file), targetPath, force=force)
 
                 # next recurse for directories
                 for dir in dirs:
@@ -251,7 +259,11 @@ class client (paramiko.SSHClient):
         elif os.path.isfile(originPath):
 
             # if verbose: print(f'sending file {originPath} ...')
-            self.sendFile(originPath, targetPath, force=force)
+            self.send_file(originPath, targetPath, force=force)
+        
+        # close the sftp connection
+        if self.ssh_enabled:
+            self.sftp = self.sftp.close() if self.sftp else None
 
     def join (self, path: str, *paths: str) -> str:
 
@@ -291,50 +303,184 @@ class client (paramiko.SSHClient):
             self.connect(self.host, username=self.user, password=password, key_filename=sshPath)
             
             # flip the ssh flag
-            self.sshEnabled = True
+            self.ssh_enabled = True
         
         except:
 
             print_exc()
 
-    def pathExists (self, path: str|pathlib.PosixPath) -> bool:
+    def path_exists (self, path: str|pathlib.PosixPath) -> bool:
 
         '''
         Checks if a local or remote path, pointing at file or directory, exists.
         The path is considered remote if client.sshEnabled is true.
         '''
 
-        if self.sshEnabled:
+        if self.ssh_enabled:
+
+            # check if this is a one-time use to activate sftp
+            one_time_sftp = False
+            if not self.sftp:
+                one_time_sftp = True
+                self.sftp = self.open_sftp()
+
             # check remotely
-            # if os.path.isdir(path):
-            #     exists = zl.exec(f'[ -d "{path}" ] && echo 1')
-            # else:
-            #     exists = zl.exec(f'[ -f "{path}" ] && echo 1')
-            return bool(zl.exec(f'[ -d "{path}" ] && echo 1') + zl.exec(f'[ -f "{path}" ] && echo 1'))
-        else:
-            # check locally
-            if os.path.isfile(path) or os.path.isdir(path):
-                return True
-            return False
+            exists = False
+            try:
+                self.sftp.stat(path)
+                # close the sftp if one-time use
+                if one_time_sftp:
+                    self.sftp = self.sftp.close()
+                exists = True
+            except IOError:
+                pass 
+            
+            # close the sftp if one-time use
+            if one_time_sftp:
+                self.sftp = self.sftp.close()
+            
+            return exists
+
+            # return bool(zl.exec(f'[ -d "{path}" ] && echo 1') + zl.exec(f'[ -f "{path}" ] && echo 1'))
+        
+        # check locally
+        elif os.path.isfile(path) or os.path.isdir(path):
+        
+            return True
+        
+        return False
+
+class cron:
+
+    '''
+    Automated cron job daemon for scheduling backups.
+    Add jobs which are triggered at specified cadence and day time.
+    '''
+
+    def __init__ (self, masterSecret: str) -> None:
+        
+        self.jobs = []
+        self.dailyStack = [] # a subset of self.jobs
+
+        # derive master key from secret
+        self.masterKey = self.keyGen(masterSecret) # do not save master secret
+        self.sshFilePath = None
+
+    def addJob (self, 
+            originPath: str|pathlib.PosixPath, 
+            targetPath: str|pathlib.PosixPath,
+            host: str='localhost',
+            user: str|None=None,
+            password: str|None=None,
+            sshFilePath: str|None=None,
+            compress: bool=True,
+            force: bool=False,
+            dayTime: str='00:00',
+            weekDay: str='Sunday',
+            cadence: str='weekly'):
+        
+        '''
+        Adds a new job to jobs list.
+        cadence     once, daily, weekly, monthly, quarterly
+                    if once is selected, the job will delete itself.
+        host        If host is not default (localhost), the method
+                    will require user and password to establish
+                    ssh connection.
+        '''
+
+        # corpus
+        job = {
+            'id': None,
+            'originPath': originPath,
+            'targetPath': targetPath,
+            'host': host,
+            'user': user,
+            'fingerprint': None,
+            'sshFilePath': sshFilePath,
+            'compress': compress,
+            'force': force,
+            'dayTime': dayTime,
+            'weekday': weekDay,
+            'cadence': cadence,
+            'timestamp': None
+        }
+
+        # generate unique job id and label job object
+        job['id'] = hashlib.md5(json.dumps(job).encode('ascii'))
+
+        # generate a fingerprint for job
+        job['fingerprint'] = self.encrypt(self.masterKey, password)
+
+        # add job object to jobs list
+        self.jobs.append(job)
+
+    def startJob (self, job: dict) -> bool:
+
+        '''
+        Triggers a backup job.
+        '''
+
+        cl = client()
+
+        # check if host is remote
+        if job['host'] != 'localhost':
+            cl.ssh(job['user'], job['host'], self.decrypt(self.masterKey, job['fingerprint']), job['sshFilePath'])
+        
+        # backup
+        cl.backup(job['originPath'], job['targetPath'], job['compress'], job['force'])
+
+    def decrypt (self, key: bytes, ciphertext: str) -> str:
+
+        '''
+        AES decryption method.
+        The Fernet class generates a new initialization vector for 
+        each encryption operation and prepends it to the ciphertext.
+        '''
+
+        cipher = Fernet(key)
+        return cipher.decrypt(str.encode(ciphertext)).decode()
+
+    def encrypt (self, key: bytes, plaintext: str) -> str:
+
+        '''
+        AES encryption method.
+        The Fernet class generates a new initialization vector for 
+        each encryption operation and prepends it to the ciphertext.
+        '''
+
+        cipher = Fernet(key)
+        return cipher.encrypt(str.encode(plaintext)).decode()
     
-    def createDir (self, path: str|pathlib.PosixPath):
+    def keyGen (self, secret:str) -> bytes:
 
         '''
-        Creates a local or remote directory.
-        The path is considered remote if client.sshEnabled is true.
+        Generates url-safe b64-encoded 32 bit key in bytes format from provided secret.
+        This method is useful to generate keys from secrets for Fernet module.
         '''
 
-        if self.sshEnabled:
-            zl.exec(f'mkdir {path}')
-        else:
-            # check locally
-            if not os.path.isdir(path):
-                os.makedirs(path)
+        hash_object = hashlib.sha256(secret.encode())
+        hash_hex = hash_object.hexdigest()
+        hash_base64 = base64.b64encode(bytes.fromhex(hash_hex))
+
+        return hash_base64
+    
+    def daemon (self) -> None:
+
+        try:
+
+            
+
+            # select the daily stack
+            for j in self.jobs:
+
+                pass
+
+        except:
+            print_exc()
+        
 
 if __name__ == '__main__':
 
-    
-    
     usr = "root"
     address = "5.161.46.77"
     password = getpass.getpass(f'password for {usr}: ')
@@ -343,4 +489,4 @@ if __name__ == '__main__':
     zl = client()
     zl.ssh(usr, address, password)
 
-    zl.backup('testFolder', '/root/target/', compress=True)
+    zl.backup('C:\\Users\\weezl\\Desktop\\B0-B\\Gaming', '/root/target/', compress=True)
