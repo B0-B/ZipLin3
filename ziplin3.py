@@ -12,6 +12,7 @@ import json
 import base64
 import paramiko
 import pathlib
+from time import sleep
 from cryptography.fernet import Fernet
 from traceback import print_exc
 import shutil
@@ -49,19 +50,23 @@ class client (paramiko.SSHClient):
         # convert string paths to posix paths
         if type(origin_path) is str:
             origin_path = pathlib.Path(origin_path)
-        if type(target_path) is not str:
-            target_path = self.join(target_path, '')
+        if type(target_path) is str:
+            target_path = pathlib.Path(target_path)
+        
+        # extend the base name of the target path
+        if target_path.name != origin_path.name:
+            target_path = target_path.joinpath(origin_path.name)
 
         # check if the origin path is a zip already
-        isArchive = False
+        is_archive = False
         for ext in ['.zip', '.rar', '.tar']:
             if ext in origin_path.name:
-                isArchive = True
+                is_archive = True
                 break
         
         # for both cases (file, or dir) create an archive
         # if compression is enabled
-        if compress and not isArchive:
+        if compress and not is_archive:
 
             zipPath = origin_path.parent.joinpath( origin_path.name + '.zip' )
             if verbose: print(f'prepare zip container {zipPath} ...')
@@ -76,39 +81,42 @@ class client (paramiko.SSHClient):
             print_exc()
 
         # remove the zip if it was compressed
-        if compress and not isArchive:
+        if compress and not is_archive:
             origin_path.unlink()
         
         if verbose: print(f'done.')
 
-    def checksum (self, filePath: str|pathlib.PosixPath) -> str:
+    def checksum (self, path: str|pathlib.PosixPath, remote: bool = False) -> str:
 
         '''
-        Returns checksum in md5 format for provided local file.
-        '''
- 
-        with open(filePath, 'rb') as file:
-            return hashlib.file_digest(file, 'md5').hexdigest()
-        
-    def checksum_remote (self, filePath: str|pathlib.PosixPath) -> str:
-        
-        '''
-        Returns checksum in md5 format for provided remote file.
-        If the filepath does not exist, the return will be an empty string.
+        Returns checksum in md5 format for provided local or remote file.
+
+        [Parameter]
+        path            the path to file which needs be checksummed
+                        (if the target is a linux system use absolute string, .as_posix or pure_posix)
+        remote          boolean: declares wether the file is on remote or local host system
         '''
 
-        if not self.ssh_enabled:
-            ValueError('Please enable ssh first with client.ssh!')
-        
-        # convert filepath to string
-        if type(filePath) is pathlib.PosixPath:
-            filePath = filePath.__str__()
+        if remote:
 
-        cs = self.exec(f'md5sum {filePath}').split(' ')[0]
-        
-        # remote execute
-        return cs
+            if not self.ssh_enabled:
+                ValueError('Please enable ssh first with client.ssh!')
+            
+            # convert filepath to string
+            if type(path) is pathlib.PosixPath:
+                path = path.__str__()
 
+            cs = self.exec(f'md5sum {path}').split(' ')[0]
+            
+            # remote execute
+            return cs
+        
+        else:
+        
+            with open(path, 'rb') as file:
+        
+                return hashlib.file_digest(file, 'md5').hexdigest()
+        
     def compress (self, path: str|pathlib.PosixPath, format: str='zip') -> None:
 
         '''
@@ -130,13 +138,14 @@ class client (paramiko.SSHClient):
 
         base_name = path.name
         archive_path = path.parent.joinpath(base_name)
+        suffixed_path = archive_path.with_suffix('.'+format)
 
         shutil.make_archive(archive_path, format=format, root_dir=path)
 
-        if archive_path.with_suffix('.'+format).exists():
-            print(f'Successfully created archive {str(archive_path.absolute())}.')
-        else:
-            FileNotFoundError('The archive could not be created.')
+        while not suffixed_path.exists():
+            sleep(.001)
+
+        # FileNotFoundError('The archive could not be created.')        
     
     def exec (self, command: str) -> str:
 
@@ -150,7 +159,7 @@ class client (paramiko.SSHClient):
 
         '''
         Sends a file from origin_path to target_path.
-        If client.ssh was called beforehand, the target_path will
+        If client.ssh method was called beforehand, the target_path will
         be considered on remote system. A check_sum check is performed
         apriori to prevent redundant copying.
 
@@ -166,26 +175,25 @@ class client (paramiko.SSHClient):
             self.sftp = self.open_sftp()
 
         # set the types correctly
-        if type(origin_path) is str:
-            origin_path = pathlib.Path(origin_path)
-        if type(target_path) in [pathlib.PosixPath, pathlib.WindowsPath]:
-            target_path = str(target_path.absolute())
+        origin_path = pathlib.Path(origin_path)
+        target_path = pathlib.PurePosixPath(target_path)
         
-        # get the file name
-        formattedfilename = origin_path.name
-
-        # check if the filename is included in target_path, if not include it
-        if not formattedfilename in target_path:
-            target_path = self.join(target_path, formattedfilename)
-
-        # check if scp is enabled
         # based on result determine the target checksum
         target_sum = None
-        if self.path_exists(target_path): # checks remotely or locally
-            if self.ssh_enabled:
-                target_sum = self.checksum_remote(target_path)
-            else:
-                target_sum = self.checksum(target_path)
+        # checks remotely or locally if the given target_path exists
+        # if not creates it
+        if self.path_exists(target_path, remote=self.ssh_enabled):
+            target_sum = self.checksum(target_path, remote=self.ssh_enabled) 
+        
+        # if self.ssh_enabled:
+        #     if not self.path_exists(target_path, remote=True):
+
+        # else:
+
+        # if self.ssh_enabled and self.path_exists(target_path, remote=True):
+        #     target_sum = self.checksum_remote(target_path)
+        # elif self.path_exists(target_path):
+        #     target_sum = self.checksum(target_path)
 
         # if not forced, and a target exists (and thus a target sum) 
         # the algo needs to compare checksums first
@@ -197,14 +205,14 @@ class client (paramiko.SSHClient):
                 print(f'{target_path} is already up-to-date with origin.')
                 return
 
-        # send
+        # continue otherwise with sending
         if verbose: print(f'{origin_path} ---> {self.host}:{target_path}')
         if self.ssh_enabled:
             # move remotely if client.ssh was called apriori
-            self.sftp.put(origin_path, target_path)
+            self.sftp.put(origin_path.as_posix(), target_path.as_posix())
         else:
             # move file locally
-            shutil.move(origin_path, target_path)
+            shutil.move(origin_path.as_posix(), target_path.as_posix())
         
         # close the sftp if one-time use
         if one_time_sftp:
@@ -222,41 +230,47 @@ class client (paramiko.SSHClient):
         target_path:     destination directory path as string or posix
         '''
 
+        # convert paths to posix
+        origin_path = pathlib.Path(origin_path)
+        target_path = pathlib.PurePosixPath(target_path)
+
         # open sftp connection
         if self.ssh_enabled:
             self.sftp = self.open_sftp()
 
         # check if target_path is a dir
-        is_dir = False
-        try:
-            self.sftp.stat(target_path)
-        except:
-            is_dir = True
-        if is_dir:
-            ValueError('target_path must point at a directory, not a file!')
+        # is_dir = False
+        # try:
+        #     self.sftp.stat(target_path)
+        # except:
+        #     is_dir = True
+        # if is_dir:
+        #     ValueError('target_path must point at a directory, not a file!')
         
         # origin_path pointing at directory
-        if os.path.isdir(origin_path):
+        if origin_path.is_dir():
             
             # if verbose: print(f'sending directory {origin_path} ...')
-            for _, dirs, files in os.walk(origin_path):
+            for _, dirs, files in os.walk(str(origin_path.absolute())):
 
                 # send all files in current pointer directory
                 for file in files:
-                    
-                    # if verbose: print(f'{self.join(origin_path, file)} ---> {target_path}')
-                    self.send_file(self.join(origin_path, file), target_path, force=force)
+                    # file has an extension already!
+                    file_path = origin_path.joinpath(file)
+                    if verbose: print(f'{file_path} ---> {target_path}')
+                    self.send_file(file_path, target_path, force=force)
 
                 # next recurse for directories
                 for dir in dirs:
 
-                    self.send(self.join(origin_path, dir), self.join(target_path, dir))
+                    dir_path = origin_path.joinpath(dir)
+                    self.send(dir_path, target_path.joinpath(dir).as_posix())
 
                 # stop the loop after one iteration
                 return
 
         # origin_path pointing at single file
-        elif os.path.isfile(origin_path):
+        elif origin_path.is_file():
 
             # if verbose: print(f'sending file {origin_path} ...')
             self.send_file(origin_path, target_path, force=force)
@@ -309,14 +323,19 @@ class client (paramiko.SSHClient):
 
             print_exc()
 
-    def path_exists (self, path: str|pathlib.PosixPath) -> bool:
+    def path_exists (self, path: str|pathlib.PosixPath, remote: bool=False) -> bool:
 
         '''
         Checks if a local or remote path, pointing at file or directory, exists.
         The path is considered remote if client.ssh_enabled is true.
         '''
 
-        if self.ssh_enabled:
+        path = pathlib.Path(path)
+
+        if remote and not self.ssh_enabled:
+            ValueError('For calling path_exists on remote host please enable ssh by calling the client.ssh method first!')
+
+        if remote:
 
             # check if this is a one-time use to activate sftp
             one_time_sftp = False
@@ -327,13 +346,10 @@ class client (paramiko.SSHClient):
             # check remotely
             exists = False
             try:
-                self.sftp.stat(path)
-                # close the sftp if one-time use
-                if one_time_sftp:
-                    self.sftp = self.sftp.close()
+                self.sftp.stat(path.as_posix())
                 exists = True
             except IOError:
-                pass 
+                pass # FileNotFoundError if the path is not found
             
             # close the sftp if one-time use
             if one_time_sftp:
@@ -344,7 +360,7 @@ class client (paramiko.SSHClient):
             # return bool(zl.exec(f'[ -d "{path}" ] && echo 1') + zl.exec(f'[ -f "{path}" ] && echo 1'))
         
         # check locally
-        elif os.path.isfile(path) or os.path.isdir(path):
+        elif path.is_file() or path.is_dir():
         
             return True
         
