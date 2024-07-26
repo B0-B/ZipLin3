@@ -47,15 +47,13 @@ class client (paramiko.SSHClient):
         archive already e.g. of type .zip, .rar, .tar.
         '''
 
-        # convert string paths to posix paths
-        if type(origin_path) is str:
-            origin_path = pathlib.Path(origin_path)
-        if type(target_path) is str:
-            target_path = pathlib.Path(target_path)
+        # convert paths to posix
+        origin_path = pathlib.Path(origin_path)
+        target_path = pathlib.PurePosixPath(target_path)
         
         # extend the base name of the target path
-        if target_path.name != origin_path.name:
-            target_path = target_path.joinpath(origin_path.name)
+        # if target_path.name != origin_path.name:
+        #     target_path = target_path.joinpath(origin_path.name)
 
         # check if the origin path is a zip already
         is_archive = False
@@ -177,6 +175,11 @@ class client (paramiko.SSHClient):
         # set the types correctly
         origin_path = pathlib.Path(origin_path)
         target_path = pathlib.PurePosixPath(target_path)
+
+        # paramiko requires target_path to include the filename,
+        # so append it.
+        # https://github.com/paramiko/paramiko/issues/1000
+        target_path = target_path.joinpath(origin_path.name)
         
         # based on result determine the target checksum
         target_sum = None
@@ -184,35 +187,31 @@ class client (paramiko.SSHClient):
         # if not creates it
         if self.path_exists(target_path, remote=self.ssh_enabled):
             target_sum = self.checksum(target_path, remote=self.ssh_enabled) 
-        
-        # if self.ssh_enabled:
-        #     if not self.path_exists(target_path, remote=True):
-
-        # else:
-
-        # if self.ssh_enabled and self.path_exists(target_path, remote=True):
-        #     target_sum = self.checksum_remote(target_path)
-        # elif self.path_exists(target_path):
-        #     target_sum = self.checksum(target_path)
 
         # if not forced, and a target exists (and thus a target sum) 
         # the algo needs to compare checksums first
         if not force and target_sum:
-
             orgin_sum = self.checksum(origin_path)
-            
+            # skip if the checksums match
             if orgin_sum == target_sum:
                 print(f'{target_path} is already up-to-date with origin.')
                 return
 
+        # paramiko requires target_path to include the filename,
+        # so append it.
+        # https://github.com/paramiko/paramiko/issues/1000
+        # target_path = target_path.joinpath(origin_path.name)
+
         # continue otherwise with sending
-        if verbose: print(f'{origin_path} ---> {self.host}:{target_path}')
+        if verbose: print(f'{origin_path} ---> {self.host}:{target_path}', end='\r')
         if self.ssh_enabled:
             # move remotely if client.ssh was called apriori
-            self.sftp.put(origin_path.as_posix(), target_path.as_posix())
+            self.sftp.put(str(origin_path), target_path.as_posix())
         else:
             # move file locally
-            shutil.move(origin_path.as_posix(), target_path.as_posix())
+            shutil.move(str(origin_path), str(target_path))
+        if verbose: 
+            print(f'{origin_path} ---> {self.host}:{target_path} ✅', end='\n')
         
         # close the sftp if one-time use
         if one_time_sftp:
@@ -237,34 +236,37 @@ class client (paramiko.SSHClient):
         # open sftp connection
         if self.ssh_enabled:
             self.sftp = self.open_sftp()
-
-        # check if target_path is a dir
-        # is_dir = False
-        # try:
-        #     self.sftp.stat(target_path)
-        # except:
-        #     is_dir = True
-        # if is_dir:
-        #     ValueError('target_path must point at a directory, not a file!')
         
         # origin_path pointing at directory
         if origin_path.is_dir():
+
+            # apriori check if the target directory exists (as it should not)
+            # if not create it remote or locally
+            target_basename = origin_path.name
+            target_final = target_path.joinpath(target_basename)
+            if not self.path_exists(target_final.as_posix(), remote=self.ssh_enabled):
+                if self.ssh_enabled:
+                    self.sftp.mkdir(target_final.as_posix())
+                else:
+                    os.mkdir(str(target_final))
+
+            # override the current target_path with the new base name
+            target_path = target_final
             
-            # if verbose: print(f'sending directory {origin_path} ...')
             for _, dirs, files in os.walk(str(origin_path.absolute())):
 
                 # send all files in current pointer directory
                 for file in files:
+
                     # file has an extension already!
                     file_path = origin_path.joinpath(file)
-                    if verbose: print(f'{file_path} ---> {target_path}')
-                    self.send_file(file_path, target_path, force=force)
+                    self.send_file(file_path, target_path, force=force, verbose=verbose)
 
                 # next recurse for directories
                 for dir in dirs:
 
                     dir_path = origin_path.joinpath(dir)
-                    self.send(dir_path, target_path.joinpath(dir).as_posix())
+                    self.send(dir_path, target_path.joinpath(dir).as_posix(), verbose=verbose)
 
                 # stop the loop after one iteration
                 return
@@ -273,7 +275,7 @@ class client (paramiko.SSHClient):
         elif origin_path.is_file():
 
             # if verbose: print(f'sending file {origin_path} ...')
-            self.send_file(origin_path, target_path, force=force)
+            self.send_file(origin_path, target_path, force=force, verbose=verbose)
         
         # close the sftp connection
         if self.ssh_enabled:
