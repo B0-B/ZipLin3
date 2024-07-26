@@ -266,7 +266,8 @@ class client (paramiko.SSHClient):
                 for dir in dirs:
 
                     dir_path = origin_path.joinpath(dir)
-                    self.send(dir_path, target_path.joinpath(dir).as_posix(), verbose=verbose)
+                    # print('test', target_path.joinpath(dir).as_posix())
+                    self.send(dir_path, target_path, verbose=verbose)
 
                 # stop the loop after one iteration
                 return
