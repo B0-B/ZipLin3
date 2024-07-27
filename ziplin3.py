@@ -11,13 +11,67 @@ import os
 import json
 import base64
 import paramiko
-import pathlib
+from pathlib import PosixPath, PurePosixPath, Path
 from time import sleep
 from cryptography.fernet import Fernet
 from traceback import print_exc
+from datetime import datetime
 import shutil
 import hashlib
 import getpass
+
+def log (*stdout: any, header:str='', log_path: PosixPath|str|None=None, 
+         verbose: bool=True, end='\n') -> None:
+
+    '''
+    Global logging function.
+    '''
+
+    if not verbose and not log_path:
+        return
+    
+    if log_path:
+
+        log_path = Path(log_path)
+
+        # create a log file if it doesnt exist
+        if not log_path.exists():
+            log_path.touch()
+
+    # assemble output
+    body = '\t'.join(stdout)
+    timestamp = datetime.now().strftime('%d-%m %H:%M:%S')
+    
+    if verbose:
+        output_str = f'{timestamp}  {header}  {body}'
+        pad = ''
+        if end == '\r':
+            pad = ''.join([' ']*(os.get_terminal_size()[0]-len(output_str)))
+        print(f'{timestamp}  {header}  {body}{pad}', end=end)
+
+    # log to file
+    if log_path:
+        with open(log_path, 'a', encoding="utf-8") as log_file:
+            log_file.write(f'{timestamp}  |  {body}\n')
+
+def size_format (size_in_bytes: int) -> tuple[float, str]:
+
+        '''
+        Returns the memory used by the current process.
+        Will return a tuple (value, string suffix), the suffix is
+        from 'b', 'kb', 'mb', 'gb', 'tb', depending on size.
+        '''
+        
+        suffix = ['b', 'kb', 'mb', 'gb', 'tb']
+
+        # select correct suffix
+        ind = 0
+        while size_in_bytes >= 100:
+            size_in_bytes /= 1024
+            ind += 1
+        size_in_bytes = round(size_in_bytes, 1)
+
+        return (size_in_bytes, suffix[ind])
 
 class client (paramiko.SSHClient):
 
@@ -35,9 +89,19 @@ class client (paramiko.SSHClient):
         # store routes: origin-target-pairs
         self.routes = {}
         self.host = 'localhost'
+
+        self.bar_sym = '█'
+        self.completed_size = 0
+        self.copied_size = 0      # actually copied size
+        self.deleted_size = 0
+        self.pad = ''.join([' ']*100)
+        self.total_backup_size = 0
+        self.progress = 0
+        self.process = 0
     
-    def backup (self, origin_path: str|pathlib.PosixPath, target_path: str|pathlib.PosixPath, 
-                compress: bool=False, compress_format: str='zip', force: bool=False, verbose: bool=True) -> bool:
+    def backup (self, origin_path: str|PosixPath, target_path: str|PosixPath, 
+                compress: bool=False, compress_format: str='zip', clean_artifacts: bool=True, 
+                force: bool=False, verbose: bool=True, log_path: PosixPath|str|None=None, progress_bar:bool=True) -> bool:
 
         '''
         Backups the origin path (host) which points at a file or directory, to target
@@ -45,15 +109,28 @@ class client (paramiko.SSHClient):
 
         If compress is true the origin_path will be zipped, but only if it's not an 
         archive already e.g. of type .zip, .rar, .tar.
+
+        [Parameters]
+        origin_path         path to file as string or posix
+        target_path         destination directory path as string or posix,
+                            the path needs to exist
+        compress            if to compress before backup;
+                            if enabled will create an archive from origin_path 
+                            which will be sent as a single 'file'
+        compress_format     a compression format, default: 'zip' 
+                            other registered formats: rar, tar.
+                            Note: Although RAR is faster for large file 
+                            compression, zip is superior for 
+                            cross-platform compatibility.
+        clean_artifacts     will clear all artifacts in provided target_path 
+                            which are not tracked in corresponding origin_path.
+        force               if enabled will ignorantly copy everything
+        verbose             verbose shell output
         '''
 
         # convert paths to posix
-        origin_path = pathlib.Path(origin_path)
-        target_path = pathlib.PurePosixPath(target_path)
-        
-        # extend the base name of the target path
-        # if target_path.name != origin_path.name:
-        #     target_path = target_path.joinpath(origin_path.name)
+        origin_path = Path(origin_path)
+        target_path = PurePosixPath(target_path)
 
         # check if the origin path is a zip already
         is_archive = False
@@ -65,16 +142,16 @@ class client (paramiko.SSHClient):
         # for both cases (file, or dir) create an archive
         # if compression is enabled
         if compress and not is_archive:
-
             zipPath = origin_path.parent.joinpath( origin_path.name + '.zip' )
-            if verbose: print(f'prepare zip container {zipPath} ...')
+            log(f'prepare zip container {zipPath} ...', verbose=verbose)
             self.compress(origin_path, compress=compress_format)
             # transform origin path to zip path
             origin_path = zipPath
 
-        # send
+        # backup
         try:
-            self.send(origin_path, target_path, force, verbose)
+            # sends all contents in origin_path recursively into target_path
+            self.send(origin_path, target_path, force, clean_artifacts, verbose, log_path=log_path)
         except:
             print_exc()
 
@@ -82,9 +159,10 @@ class client (paramiko.SSHClient):
         if compress and not is_archive:
             origin_path.unlink()
         
-        if verbose: print(f'done.')
+        copied = size_format(self.copied_size)
+        log(header=f'🏁 successfully copied {copied[0]} {copied[1].upper()}', verbose=verbose, log_path=log_path, end='\r')
 
-    def checksum (self, path: str|pathlib.PosixPath, remote: bool = False) -> str:
+    def checksum (self, path: str|PosixPath, remote: bool = False) -> str:
 
         '''
         Returns checksum in md5 format for provided local or remote file.
@@ -101,7 +179,7 @@ class client (paramiko.SSHClient):
                 ValueError('Please enable ssh first with client.ssh!')
             
             # convert filepath to string
-            if type(path) is pathlib.PosixPath:
+            if type(path) is PosixPath:
                 path = path.__str__()
 
             cs = self.exec(f'md5sum {path}').split(' ')[0]
@@ -114,8 +192,46 @@ class client (paramiko.SSHClient):
             with open(path, 'rb') as file:
         
                 return hashlib.file_digest(file, 'md5').hexdigest()
-        
-    def compress (self, path: str|pathlib.PosixPath, format: str='zip') -> None:
+
+    def clean_artifacts (self, target_path: str|PosixPath, local_dirs: list[str], 
+                         local_files: list[str], verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
+
+        '''
+        Will clear all artifacts in provided target_path which are not tracked in corresponding origin_path.
+        The base_names in corr. origin_path are splitted across local_dirs and local_files.
+
+        [Parameters]
+        target_path         the path on remote host in which to clean
+        local_dirs          list of expected local dirs in corr. origin branch
+        local_files         list of expected local files in corr. origin branch
+        '''
+
+        remote_names = self.sftp.listdir(target_path.as_posix()) if self.ssh_enabled else os.listdir(target_path)
+                    
+        for base_name in remote_names:
+            
+            if base_name in local_files or base_name in local_dirs:
+                continue
+            
+            # otherwise delete file or folder if not in origin dirs or files
+            node = target_path.joinpath(base_name)
+            log(f'clean artifact: {node.as_posix()}', verbose=verbose, log_path=log_path, end='\r')
+
+            if self.ssh_enabled:
+
+                try: # file
+                    self.sftp.remove(node.as_posix())
+                except IOError: # directory
+                    self.sftp.rmdir(node.as_posix())
+            
+            else:
+
+                if os.path.isdir(str(node.absolute())):
+                    os.rmdir(str(node.absolute()))
+                else:
+                    os.remove(str(node.absolute()))
+
+    def compress (self, path: str|PosixPath, format: str='zip') -> None:
 
         '''
         Will create a container from provided directory path 
@@ -128,8 +244,8 @@ class client (paramiko.SSHClient):
                         for more info see: shutil.make_archive
         '''
         
-        if type(path) is not pathlib.PosixPath:
-            path = pathlib.Path(path)
+        if type(path) is not PosixPath:
+            path = Path(path)
         
         if not path.is_dir():
             ValueError('Provided path is not a directory!')
@@ -140,10 +256,9 @@ class client (paramiko.SSHClient):
 
         shutil.make_archive(archive_path, format=format, root_dir=path)
 
+        # await the file creation
         while not suffixed_path.exists():
-            sleep(.001)
-
-        # FileNotFoundError('The archive could not be created.')        
+            sleep(.001)  
     
     def exec (self, command: str) -> str:
 
@@ -152,8 +267,30 @@ class client (paramiko.SSHClient):
             ValueError(stderr)
         return stdout.read().decode('utf-8')
     
-    def send_file (self, origin_path: str|pathlib.PosixPath, target_path: str|pathlib.PosixPath, 
-                  force: bool=False, verbose: bool=True) -> None:
+    def format_progress (self) -> str:
+        fulls = int(self.completed_size / self.total_backup_size * 50)
+        empty = 50 - fulls
+        return '|' + ''.join([self.bar_sym]*fulls) + ''.join([' ']*empty) + f'| ({int(self.completed_size / self.total_backup_size * 100)}%)'
+    
+    def get_size (self, path: str|PosixPath) -> int:
+
+        '''
+        Returns the size of provided path which points at a folder
+        or file in bytes. For local usage only.
+
+        [Parameter]
+        path        the node whose size is of interest
+
+        [Return]
+        The node size in integer bytes.
+        '''
+
+        path = Path(path)
+        
+        return sum(f.stat().st_size for f in path.glob('**/*') if f.is_file()) if path.is_dir() else path.stat().st_size
+
+    def send_file (self, origin_path: str|PosixPath, target_path: str|PosixPath, 
+                  force: bool=False, verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
 
         '''
         Sends a file from origin_path to target_path.
@@ -161,9 +298,9 @@ class client (paramiko.SSHClient):
         be considered on remote system. A check_sum check is performed
         apriori to prevent redundant copying.
 
-        origin_path:     path to file as string or posix
-        target_path:     destination directory path as string or posix.
-                        Directory needs to exist already.
+        origin_path         path to file as string or posix
+        target_path         destination directory path as string or posix.
+                            Directory needs to exist already.
         '''
 
         # check if this is a one-time use to activate sftp
@@ -173,65 +310,75 @@ class client (paramiko.SSHClient):
             self.sftp = self.open_sftp()
 
         # set the types correctly
-        origin_path = pathlib.Path(origin_path)
-        target_path = pathlib.PurePosixPath(target_path)
+        origin_path = Path(origin_path)
+        target_path = PurePosixPath(target_path)
 
         # paramiko requires target_path to include the filename,
         # so append it.
         # https://github.com/paramiko/paramiko/issues/1000
         target_path = target_path.joinpath(origin_path.name)
+
+        # determine file size and aggregate to completed bytes
+        size = self.get_size(origin_path)
+        self.completed_size += size
         
-        # based on result determine the target checksum
-        target_sum = None
-        # checks remotely or locally if the given target_path exists
-        # if not creates it
-        if self.path_exists(target_path, remote=self.ssh_enabled):
-            target_sum = self.checksum(target_path, remote=self.ssh_enabled) 
+        # check if there is a difference in origin and target
+        if self.is_identical(origin_path, target_path, self.ssh_enabled, force):
+            log(f'{target_path} is already up-to-date with origin.', header=self.format_progress(), verbose=verbose, log_path=log_path, end='\r')
+            return
 
-        # if not forced, and a target exists (and thus a target sum) 
-        # the algo needs to compare checksums first
-        if not force and target_sum:
-            orgin_sum = self.checksum(origin_path)
-            # skip if the checksums match
-            if orgin_sum == target_sum:
-                print(f'{target_path} is already up-to-date with origin.')
-                return
+        # try to copy
+        try:
 
-        # paramiko requires target_path to include the filename,
-        # so append it.
-        # https://github.com/paramiko/paramiko/issues/1000
-        # target_path = target_path.joinpath(origin_path.name)
+            # continue otherwise with sending
+            log(f'{origin_path}', header=self.format_progress(), verbose=verbose, end='\r')
 
-        # continue otherwise with sending
-        if verbose: print(f'{origin_path} ---> {self.host}:{target_path}', end='\r')
-        if self.ssh_enabled:
-            # move remotely if client.ssh was called apriori
-            self.sftp.put(str(origin_path), target_path.as_posix())
-        else:
-            # move file locally
-            shutil.move(str(origin_path), str(target_path))
-        if verbose: 
-            print(f'{origin_path} ---> {self.host}:{target_path} ✅', end='\n')
+            if self.ssh_enabled:
+                # move remotely if client.ssh was called apriori
+                self.sftp.put(str(origin_path), target_path.as_posix())
+            else:
+                # move file locally
+                shutil.move(str(origin_path), str(target_path))
+            if verbose: 
+                log(f'{origin_path} ---> {self.host}:{target_path}', verbose=False, log_path=log_path)
+            
+            # close the sftp if one-time use
+            if one_time_sftp:
+                self.sftp = self.sftp.close()
+            
+            # denote the copied size
+            self.copied_size += size
         
-        # close the sftp if one-time use
-        if one_time_sftp:
-            self.sftp = self.sftp.close()
-
-    def send (self, origin_path: str|pathlib.PosixPath, target_path: str|pathlib.PosixPath, 
-              force: bool=False, verbose: bool=True) -> None:
+        except Exception as e:
+                
+            log(f'{origin_path} ---> {self.host}:{target_path}:', e, header='error', verbose=False, log_path=log_path)
+            
+    def send (self, origin_path: str|PosixPath, target_path: str|PosixPath, 
+              force: bool=False, clean_artifacts: bool=True, verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
 
         '''
         Sends a file or whole directory at origin into a directory at target_path.
         If client.ssh was called beforehand, the target_path will
         be considered on remote system.
 
-        origin_path:     path to file as string or posix
-        target_path:     destination directory path as string or posix
+        [Parameter]
+        origin_path:        path to file as string or posix
+        target_path:        destination directory path as string or posix
+        force               if enabled will always send the file
+        clean_artifact      if enabled will remove all files in target which are not 
+                            tracked in origin
+        verbose             if enabled will log process in shell
         '''
 
+        # remember the root level
+        root = False
+        if not self.total_backup_size:
+            root = True
+            self.total_backup_size = self.get_size(origin_path)
+
         # convert paths to posix
-        origin_path = pathlib.Path(origin_path)
-        target_path = pathlib.PurePosixPath(target_path)
+        origin_path = Path(origin_path)
+        target_path = PurePosixPath(target_path)
 
         # open sftp connection
         if self.ssh_enabled:
@@ -254,20 +401,24 @@ class client (paramiko.SSHClient):
             target_path = target_final
             
             for _, dirs, files in os.walk(str(origin_path.absolute())):
-
+                
                 # send all files in current pointer directory
                 for file in files:
 
                     # file has an extension already!
                     file_path = origin_path.joinpath(file)
-                    self.send_file(file_path, target_path, force=force, verbose=verbose)
+                    self.send_file(file_path, target_path, force=force, verbose=verbose, log_path=log_path)
 
                 # next recurse for directories
                 for dir in dirs:
 
                     dir_path = origin_path.joinpath(dir)
-                    # print('test', target_path.joinpath(dir).as_posix())
-                    self.send(dir_path, target_path, verbose=verbose)
+                    self.send(dir_path, target_path, verbose=verbose, log_path=log_path)
+
+                # cleaning
+                if clean_artifacts:
+
+                    self.clean_artifacts(target_path, dirs, files, log_path=log_path)
 
                 # stop the loop after one iteration
                 return
@@ -275,12 +426,15 @@ class client (paramiko.SSHClient):
         # origin_path pointing at single file
         elif origin_path.is_file():
 
-            # if verbose: print(f'sending file {origin_path} ...')
-            self.send_file(origin_path, target_path, force=force, verbose=verbose)
+            self.send_file(origin_path, target_path, force=force, verbose=verbose, log_path=log_path)
         
         # close the sftp connection
         if self.ssh_enabled:
             self.sftp = self.sftp.close() if self.sftp else None
+        
+        # reset progress values
+        if root:
+            self.total_backup_size = self.completed_size = self.copied_size = self.deleted_size = 0
 
     def join (self, path: str, *paths: str) -> str:
 
@@ -296,7 +450,7 @@ class client (paramiko.SSHClient):
 
         return extendedPath
 
-    def ssh (self, user: str, host: str, password: str|None=None, ssh_path: str|pathlib.PosixPath|None=None, port: int=22) -> None:
+    def ssh (self, user: str, host: str, password: str|None=None, ssh_path: str|PosixPath|None=None, port: int=22) -> None:
         
         '''
         Connects to host via ssh.
@@ -326,14 +480,14 @@ class client (paramiko.SSHClient):
 
             print_exc()
 
-    def path_exists (self, path: str|pathlib.PosixPath, remote: bool=False) -> bool:
+    def path_exists (self, path: str|PosixPath, remote: bool=False) -> bool:
 
         '''
         Checks if a local or remote path, pointing at file or directory, exists.
         The path is considered remote if client.ssh_enabled is true.
         '''
 
-        path = pathlib.Path(path)
+        path = Path(path)
 
         if remote and not self.ssh_enabled:
             ValueError('For calling path_exists on remote host please enable ssh by calling the client.ssh method first!')
@@ -369,6 +523,35 @@ class client (paramiko.SSHClient):
         
         return False
 
+    def is_identical (self, origin_path: str|PosixPath, target_path: str|PosixPath, remote: bool=False, force: bool=False):
+
+        '''
+        Returns a boolean result from whether two files on the same or varying hosts differ.
+        If the target_path does not exist the return will be true.
+
+        [Parameter]
+        origin_path         the origin file
+        target_path         the path of the file for comparison
+        remote              boolean: declares wether the target file is 
+                            on remote or local host system
+        force               if force is enabled the return will be False
+                            and everything else is ignored - this will
+                            indicate that the files always differ.
+        '''
+
+        target_sum = None
+
+        # checks remotely or locally if the given target_path exists
+        # if not creates it
+        if force or not self.path_exists(target_path, remote=remote):
+            return False
+        
+        # compare checksums
+        target_sum = self.checksum(target_path, remote=remote) 
+        orgin_sum = self.checksum(origin_path)
+
+        return orgin_sum == target_sum
+
 class cron:
 
     '''
@@ -386,8 +569,8 @@ class cron:
         self.sshFilePath = None
 
     def addJob (self, 
-            origin_path: str|pathlib.PosixPath, 
-            target_path: str|pathlib.PosixPath,
+            origin_path: str|PosixPath, 
+            target_path: str|PosixPath,
             host: str='localhost',
             user: str|None=None,
             password: str|None=None,
