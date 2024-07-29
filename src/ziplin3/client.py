@@ -15,10 +15,13 @@ from pathlib import PosixPath, PurePosixPath, Path
 from time import sleep
 from cryptography.fernet import Fernet
 from traceback import print_exc
-from datetime import datetime
+from time import time
+from datetime import datetime, timedelta
 import shutil
 import hashlib
 import getpass
+
+__root__ = Path(__file__).parent
 
 def log (*stdout: any, header:str='', log_path: PosixPath|str|None=None, 
          verbose: bool=True, end='\n') -> None:
@@ -94,6 +97,7 @@ class client (paramiko.SSHClient):
         self.completed_size = 0
         self.copied_size = 0      # actually copied size
         self.deleted_size = 0
+        self.files_sent = 0
         self.pad = ''.join([' ']*100)
         self.total_backup_size = 0
         self.progress = 0
@@ -128,6 +132,10 @@ class client (paramiko.SSHClient):
         verbose             verbose shell output
         '''
 
+        start_ts = datetime.now()
+        
+        log(f'start backup {origin_path} ---> {self.host}:{target_path}', verbose=False, log_path=log_path)
+
         # convert paths to posix
         origin_path = Path(origin_path)
         target_path = PurePosixPath(target_path)
@@ -158,9 +166,20 @@ class client (paramiko.SSHClient):
         # remove the zip if it was compressed
         if compress and not is_archive:
             origin_path.unlink()
-        
+
+        # determine backup time
+        dt = datetime.now() - start_ts
         copied = size_format(self.copied_size)
-        log(header=f'🏁 successfully copied {copied[0]} {copied[1].upper()}', verbose=verbose, log_path=log_path, end='\r')
+        checked = size_format(self.completed_size)
+        completed = size_format(self.completed_size)
+
+        # output
+        log(f'\n\nBackup time: {str(dt)}', header='info', verbose=verbose, log_path=log_path)
+        log(f'Backup size: {completed[0]} {completed[1]} ', header='info', verbose=verbose, log_path=log_path)
+        log(f'Checked    : {checked[0]} {checked[1].upper()}', header='info', verbose=verbose, log_path=log_path)
+        log(f'Copied     : {copied[0]} {copied[1].upper()}', header='info', verbose=verbose, log_path=log_path)
+        log(f'Files sent : {self.files_sent}', header='info')
+        log(header=f'🏁 successfully backed up {origin_path.name}.', verbose=verbose, log_path=log_path)
 
     def checksum (self, path: str|PosixPath, remote: bool = False) -> str:
 
@@ -348,6 +367,7 @@ class client (paramiko.SSHClient):
             
             # denote the copied size
             self.copied_size += size
+            self.files_sent  += 1
         
         except Exception as e:
                 
@@ -359,7 +379,7 @@ class client (paramiko.SSHClient):
         '''
         Sends a file or whole directory at origin into a directory at target_path.
         If client.ssh was called beforehand, the target_path will
-        be considered on remote system.
+        be assumed to be located on the remote system.
 
         [Parameter]
         origin_path:        path to file as string or posix
@@ -434,7 +454,7 @@ class client (paramiko.SSHClient):
         
         # reset progress values
         if root:
-            self.total_backup_size = self.completed_size = self.copied_size = self.deleted_size = 0
+            self.total_backup_size = self.completed_size = self.copied_size = self.deleted_size = self.files_sent = 0
 
     def join (self, path: str, *paths: str) -> str:
 
@@ -463,9 +483,6 @@ class client (paramiko.SSHClient):
 
             if not ssh_path and not password:
                 ValueError('Please provide either a password or an ssh file path')
-            
-            if not password:
-                password = ''
 
             self.user = user
             self.host = host
