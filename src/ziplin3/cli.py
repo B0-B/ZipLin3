@@ -55,7 +55,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                     prog='ziplin3',
                     description='A modular tool for local and remote backup management via ssh.',
-                    epilog='For convenient and simple backuping!')
+                    epilog='For simple and convenient backups!')
     # route details
     parser.add_argument('-o', '--origin', help="Origin path of the directory of archive which should be backuped.", default='./')
     parser.add_argument('-t', '--target', help="Target path of the directory on local or remote host e.g. '/home/linuxUser/.backups/'")
