@@ -136,7 +136,7 @@ class client (paramiko.SSHClient):
         #     self.cache_dir.mkdir()
     
     def backup (self, origin_path: str|PosixPath, target_path: str|PosixPath, 
-                compress: bool=False, compress_format: str='zip', clean_artifacts: bool=True, 
+                compress: bool=False, compress_format: str='zip', clean_artifacts: bool=False, 
                 force: bool=False, verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
 
         '''
@@ -279,11 +279,16 @@ class client (paramiko.SSHClient):
                     self.sftp.rmdir(node.as_posix())
             
             else:
-
-                if os.path.isdir(str(node.absolute())):
-                    os.rmdir(str(node.absolute()))
+                
+                if isinstance(node, PurePosixPath):
+                    node_path_str = str(node)
+                elif isinstance(node, Path):
+                    node_path_str = str(node.absolute())  # Use absolute for Path
+                
+                if os.path.isdir(node_path_str):
+                    os.rmdir(node_path_str)
                 else:
-                    os.remove(str(node.absolute()))
+                    os.remove(node_path_str)
 
     def compress (self, path: str|PosixPath, format: str='zip') -> None:
 
@@ -426,7 +431,7 @@ class client (paramiko.SSHClient):
         return False
 
     def send (self, origin_path: str|PosixPath, target_path: str|PosixPath, 
-              force: bool=False, clean_artifacts: bool=True, verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
+              force: bool=False, clean_artifacts: bool=False, verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
 
         '''
         Sends a file or whole directory at origin into a directory at target_path.
