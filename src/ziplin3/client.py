@@ -524,7 +524,7 @@ class client (paramiko.SSHClient):
 
         # check if this is a one-time use to activate sftp
         one_time_sftp = False
-        if not self.sftp:
+        if not self.sftp and self.ssh_enabled:
             one_time_sftp = True
             self.sftp = self.open_sftp()
 
