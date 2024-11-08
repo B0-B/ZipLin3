@@ -119,16 +119,21 @@ class client (paramiko.SSHClient):
         self.sftp = None
         self.host = 'localhost'
         self.ssh_path = None
-        self.bar_sym = '█'
-        self.completed_size = 0
-        self.copied_size = 0      # actually copied size
-        self.deleted_size = 0
-        self.files_sent = 0
-        self.pad = ''.join([' ']*100)
+        
+        # count statistics
         self.total_backup_size = 0
+        self.compressed_size = 0
+        self.files_sent = 0
+        self.checked_size = 0
+        self.copied_size = 0      # actually copied size
+        self.cleaned = 0
+
+        # progress bar
+        self.bar_sym = '█'
+        self.pad = ''.join([' ']*100)
         self.progress = 0
         self.process = 0
-
+        
         # ---- cache ----
         # get user hash path
         # self.cache_dir = Path.home().joinpath('.cache/zipLin3') 
@@ -168,9 +173,15 @@ class client (paramiko.SSHClient):
         
         log(f'start backup {origin_path} ---> {self.host}:{target_path}', verbose=False, log_path=log_path)
 
+        # reset values
+        self.copied_size = self.checked_size = self.files_sent = self.cleaned = 0
+
         # convert paths to posix
         origin_path = Path(origin_path)
         target_path = PurePosixPath(target_path)
+
+        # determine the total size of the origin
+        self.total_backup_size = self.get_size(origin_path)
 
         # check if the origin path is a zip already
         is_archive = False
@@ -182,12 +193,15 @@ class client (paramiko.SSHClient):
         # for both cases (file, or dir) create an archive
         # if compression is enabled
         if compress and not is_archive:
+            # get the zip path and verbose
             zipPath = origin_path.parent.joinpath( origin_path.name + '.zip' )
-            print('test', zipPath.name)
             log(f'prepare zip container {zipPath} ...', verbose=verbose)
+            # do the compression
             self.compress(origin_path, format=compress_format)
             # transform origin path to zip path
             origin_path = zipPath
+            # determine the size of the compressed folder
+            self.compressed_size = self.get_size(origin_path)
 
         # backup
         try:
@@ -202,18 +216,26 @@ class client (paramiko.SSHClient):
 
         # determine backup time
         dt = datetime.now() - start_ts
+        compressed = size_format(self.compressed_size)
         copied = size_format(self.copied_size)
-        checked = size_format(self.completed_size)
-        completed = size_format(self.completed_size)
+        checked = size_format(self.checked_size)
+        total = size_format(self.total_backup_size)
 
         # output
         log(f'\n\nBackup time: {str(dt)}', header='info', verbose=verbose, log_path=log_path)
-        log(f'Backup size: {completed[0]} {completed[1]} ', header='info', verbose=verbose, log_path=log_path)
-        log(f'Checked    : {checked[0]} {checked[1].upper()}', header='info', verbose=verbose, log_path=log_path)
-        log(f'Copied     : {copied[0]} {copied[1].upper()}', header='info', verbose=verbose, log_path=log_path)
-        log(f'Files sent : {self.files_sent}', header='info')
-        log(header=f'🏁 successfully backed up {origin_path.name}.', verbose=verbose, log_path=log_path)
+        log(f'Backup size   : {total[0]} {total[1].upper()} ', header='info', verbose=verbose, log_path=log_path)
+        log(f'Compressed    : {compressed[0]} {compressed[1].upper()} ', header='info', verbose=verbose, log_path=log_path) if compress else None
+        log(f'Checked       : {checked[0]} {checked[1].upper()}', header='info', verbose=verbose, log_path=log_path)
+        log(f'Copied        : {copied[0]} {copied[1].upper()}', header='info', verbose=verbose, log_path=log_path)
+        log(f'Files sent    : {self.files_sent}', header='info')
+        log(f'Files cleaned : {self.cleaned}', header='info') if clean_artifacts else None
 
+        if self.files_sent:
+            log(header=f'🏁 successfully backed up {origin_path.name}.', verbose=verbose, log_path=log_path)
+        else:
+            log(header=f'🏁 {origin_path.name} backup is already up to date.', verbose=verbose, log_path=log_path)
+
+        
         # if as_cron:
         #     cron(origin_path, target_path, origin_path.name, '22:00', 'weekly', self.host, self.user, self.ssh_path).save()
 
@@ -252,10 +274,12 @@ class client (paramiko.SSHClient):
                          local_files: list[str], verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
 
         '''
-        Will clear all artifacts in provided target_path which are not tracked in corresponding origin_path.
-        The base_names in corr. origin_path are splitted across local_dirs and local_files.
+        Will clear all artifacts in provided target_path which are not tracked in corresponding origin_path at the same depth correspondingly.
+        The base_names in corr. origin_path are splitted across local_dirs and local_files. 
+        Note: This function will only work for one depth level.
 
         [Parameters]
+
         target_path         the path on remote host in which to clean
         local_dirs          list of expected local dirs in corr. origin branch
         local_files         list of expected local files in corr. origin branch
@@ -271,6 +295,7 @@ class client (paramiko.SSHClient):
             # otherwise delete file or folder if not in origin dirs or files
             node = target_path.joinpath(base_name)
             log(f'clean artifact: {node.as_posix()}', verbose=verbose, log_path=log_path, end='\r')
+            self.cleaned += 1
 
             if self.ssh_enabled:
 
@@ -338,9 +363,9 @@ class client (paramiko.SSHClient):
         return stdout.read().decode('utf-8')
     
     def format_progress (self) -> str:
-        fulls = int(self.completed_size / self.total_backup_size * 50)
+        fulls = int(self.checked_size / self.total_backup_size * 50)
         empty = 50 - fulls
-        return '|' + ''.join([self.bar_sym]*fulls) + ''.join([' ']*empty) + f'| ({int(self.completed_size / self.total_backup_size * 100)}%)'
+        return '|' + ''.join([self.bar_sym]*fulls) + ''.join([' ']*empty) + f'| ({int(self.checked_size / self.total_backup_size * 100)}%)'
     
     def get_size (self, path: str|PosixPath) -> int:
 
@@ -440,19 +465,14 @@ class client (paramiko.SSHClient):
         be assumed to be located on the remote system.
 
         [Parameter]
-        origin_path:        path to file as string or posix
-        target_path:        destination directory path as string or posix
+
+        origin_path         path to file as string or posix
+        target_path         destination directory path as string or posix
         force               if enabled will always send the file
         clean_artifact      if enabled will remove all files in target which are not 
                             tracked in origin
         verbose             if enabled will log process in shell
         '''
-
-        # remember the root level
-        root = False
-        if not self.total_backup_size:
-            root = True
-            self.total_backup_size = self.get_size(origin_path)
 
         # convert paths to posix
         origin_path = Path(origin_path)
@@ -509,10 +529,6 @@ class client (paramiko.SSHClient):
         # close the sftp connection
         if self.ssh_enabled:
             self.sftp = self.sftp.close() if self.sftp else None
-        
-        # reset progress values
-        if root:
-            self.total_backup_size = self.completed_size = self.copied_size = self.deleted_size = self.files_sent = 0
 
     def send_file (self, origin_path: str|PosixPath, target_path: str|PosixPath, 
                   force: bool=False, verbose: bool=True, log_path: PosixPath|str|None=None) -> None:
@@ -543,9 +559,9 @@ class client (paramiko.SSHClient):
         # https://github.com/paramiko/paramiko/issues/1000
         target_path = target_path.joinpath(origin_path.name)
 
-        # determine file size and aggregate to completed bytes
+        # determine file size and aggregate to total bytes
         size = self.get_size(origin_path)
-        self.completed_size += size
+        self.checked_size += size
         
         # check if there is a difference in origin and target
         if self.is_identical(origin_path, target_path, self.ssh_enabled, force):
@@ -574,7 +590,9 @@ class client (paramiko.SSHClient):
             # denote the copied size
             self.copied_size += size
             self.files_sent  += 1
-        
+
+            print('test', self.copied_size, self.files_sent, self.checked_size)
+
         except Exception as e:
                 
             log(f'{origin_path} ---> {self.host}:{target_path}:', e, header='error', verbose=False, log_path=log_path)
