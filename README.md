@@ -10,6 +10,13 @@ Interface software for local and remote backups via ssh.
 - Automated cleaning of legacies and artifact files / directories
 - Supports logging 
 
+# Setup
+First clone or download the project and change into the root directory.
+Run the following ``pip`` command from the root level to install
+
+```bash
+pip install .
+```
 
 # Usage
 
