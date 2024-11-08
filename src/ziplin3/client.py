@@ -183,8 +183,9 @@ class client (paramiko.SSHClient):
         # if compression is enabled
         if compress and not is_archive:
             zipPath = origin_path.parent.joinpath( origin_path.name + '.zip' )
+            print('test', zipPath.name)
             log(f'prepare zip container {zipPath} ...', verbose=verbose)
-            self.compress(origin_path, compress=compress_format)
+            self.compress(origin_path, format=compress_format)
             # transform origin path to zip path
             origin_path = zipPath
 
@@ -196,7 +197,7 @@ class client (paramiko.SSHClient):
             print_exc()
 
         # remove the zip if it was compressed
-        if compress and not is_archive:
+        if compress and not is_archive and origin_path.exists():
             origin_path.unlink()
 
         # determine backup time
@@ -562,7 +563,7 @@ class client (paramiko.SSHClient):
                 self.sftp.put(str(origin_path), target_path.as_posix())
             else:
                 # move file locally
-                shutil.move(str(origin_path), str(target_path))
+                shutil.copyfile(str(origin_path), str(target_path))
             if verbose: 
                 log(f'{origin_path} ---> {self.host}:{target_path}', verbose=False, log_path=log_path)
             
