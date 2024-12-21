@@ -18,9 +18,12 @@ Run the following ``pip`` command from the root level to install
 pip install .
 ```
 
-# Usage
+# Getting-Started
 
-## Getting-Started
+## Use as CLI
+
+
+## Use as Python Module
 
 ```python
 from ziplin3 import client
